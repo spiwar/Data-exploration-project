@@ -1,0 +1,134 @@
+---
+title: "Data Exploration Project"
+output: html_document
+---
+
+## Khoa Phan Hoang Anh
+
+## Introduction
+The goal of this project is to answer the question: Among colleges that predominantly grant bachelor’s degrees, did the release of the Scorecard shift student interest to high-earnings colleges relative to low-earnings ones (as proxied by Google searches for keywords associated with those colleges)?
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Libraries 
+```{r}
+library(tidyverse)
+library(purrr)
+library(lubridate)
+library(fixest)
+library(vtable)
+```
+
+## Data processing
+
+After importing the data, I decided to immediately filter out unnecessary variables from the scorecard, because the data is too large, which would increase processing time if I did not filter the data first. For my next step, since the goal was to look for colleges that predominantly grant bachelor’s degrees, I filtered out every college that didn’t have a PREDDEG value of 3. I then changed the earnings variable into a more palatable name, as typing its’ original name multiple times will be exhausting. There were some colleges that withheld their earnings information, so I dropped them as well.
+
+After joining the data, I created a dummy variable to distinguish between high and low earnings schools. The distinguishing number came from a website stating that individuals with 10 to 19 years of experience with a bachelor’s degree would earn on average $76,607.
+
+Link to the website: https://askwonder.com/research/difference-earnings-5-7-10-years-college-and-grad-school-graduation-expected-uvp16w4ik
+
+I then created a new date variable that aggregates the data into months. Having the data in months mean that I can control for monthly fluctuations when I create my model. Then, I created the standard deviation index, grouping it by school name and keyword. After further grouping the data, I created another dummy variable for the release of the scorecard, for the use of my regression model, which I will detail later on.
+
+
+```{r}
+
+### IMPORT
+
+# Google Trends
+trends <- list.files(path = "../Rawdata/", pattern = "trends_up_to_", full.names = TRUE)
+trends_df <- na.omit(map_df(trends, read_csv))
+
+# Scorecards and namelink
+scorecard_dictionary <- read_csv("../Rawdata/CollegeScorecardDataDictionary-09-08-2015.csv")
+scorecard <- read_csv("../Rawdata/Most+Recent+Cohorts+(Scorecard+Elements).csv")
+namelink <- read_csv("../Rawdata/id_name_link.csv")
+
+### DATA PROCESSING
+
+## SCORECARD PROCESSING
+
+# filtering out unecessary variables
+scorecard <- select(scorecard, c(UNITID,OPEID, `md_earn_wne_p10-REPORTED-EARNINGS`, PREDDEG) )
+# filter predominantly bachelor's granting colleges
+scorecard <- filter(scorecard, PREDDEG == 3, na.rm = TRUE)
+
+# change to numeric variable
+scorecard$`md_earn_wne_p10-REPORTED-EARNINGS` = as.numeric(scorecard$`md_earn_wne_p10-REPORTED-EARNINGS`, na.rm = TRUE)
+
+# change variable name (its too long)
+scorecard <- rename(scorecard, earnings = `md_earn_wne_p10-REPORTED-EARNINGS`)
+
+# drop NAs
+scorecard <- drop_na(scorecard,earnings)
+
+## NAMELINK PROCESSING
+
+# Remove duplicates
+namelink <- namelink %>% group_by(schname) %>% mutate(N =n()) %>% filter(N==1)
+
+# Change variable name (for join)
+namelink <- rename(namelink, UNITID = 'unitid', OPEID = 'opeid')
+
+## FINAL PROCESSING 
+
+# Join trends and namelink
+findata <- inner_join(trends_df,namelink, by = 'schname')
+
+# Join scorecard and findata
+findata <- inner_join(scorecard,findata, by = c('UNITID', 'OPEID'))
+
+# New dummy variable
+findata <- findata %>% mutate(earningsgroup = ifelse(earnings >= 76707, "high", "low"))
+
+# Creating new date variable (by month)
+findata <- mutate(findata, newdate = str_sub(findata$monthorweek,1,10) %>%
+  ymd() %>%
+  floor_date(unit = "month"))
+
+# Creating standard deviation index, and grouping the data
+findata <- findata %>% 
+  group_by(schname,keyword) %>% 
+  mutate(sdindex = (index - mean(index))/ sd(index)) %>%
+  group_by(schname, keyword, earningsgroup, newdate) %>%
+  summarise(sdindex = mean(sdindex))
+
+
+# Create dummy variable for scorecard release
+findata <- findata %>% mutate(release = ifelse(newdate >= "2015-09-01", "Postscore", "Prescore"))
+ 
+# Convert variables to factors
+facvar <- c('schname', 'keyword','earningsgroup','release')
+findata[facvar] <- findata[facvar] %>% lapply(factor)
+
+# Change reference factor
+findata$earningsgroup <- relevel(findata$earningsgroup, ref = 'low')
+findata$release <- relevel(findata$release, ref = 'Prescore')
+
+```
+## Regression
+
+For the regression model, I chose a difference in differences model, because it is extremely useful in measuring the effect of events. In this case, the untreated group will be the low-income schools, with the treated group being high-income schools. Any month after the release of the scorecard will be the post-release period. Month is added as a control for fluctuations that happens over the year.
+
+```{r}
+rmodel <- findata %>% feols(sdindex ~ earningsgroup * release + i(month(newdate)))
+etable(rmodel)
+  
+```
+From the regression, we can see that:
+High earnings colleges have 0.0117 standard deviations less in the search index compared to low-earning colleges. However, because the p-value is not statistically significant, we cannot reject the null hypothesis that there is no difference in search index between high and low-earning colleges.
+
+The search index went up for schools within the high earnings group 0.05 standard deviations more than it did for schools within the low earnings group from before to after the release of the scorecard. Because the p-value is also not statistically significant, we cannot reject the null hypothesis that the release of the college scorecard had the same effect on the search index for both high earnings college and low earnings college.
+
+## Line plot 
+```{r}
+
+  ggplot(findata, aes(x=newdate, y=sdindex, color = earningsgroup)) + stat_summary(geom = 'line') + geom_vline(xintercept = as.Date("2015-09-15"))
+  
+```
+
+From the graph, we can see that the search index for colleges go up and down over the years, and that there is a clear downward trend. Because the effect of the college scorecard isn't statistically significant, we cannot notice the effect, even when looking at the graph.
+
+## Conclusion
+Returning to the question posed at the beginning of the project, I can safely say that: Among colleges that predominantly grant bachelor’s degrees, the release of the Scorecard DID NOT shift student interest to high-earnings colleges relative to low-earnings ones.
